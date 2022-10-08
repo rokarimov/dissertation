@@ -1,0 +1,301 @@
+---
+title: "Analyse visa-free network data with multilevel (mixed, hierarchical) models"
+author: "Rouslan Karimov"
+date: "Created 23 June 2021"
+output:
+  html_document:
+    toc: yes
+  pdf_document:
+    toc: no
+project: dissertation
+references:
+- id: omalley
+  title: 'Longitudinal Analysis of Large Social Networks: Estimating the Effect of Health Traits on Changes in Friendship Ties'
+  author:
+  - family: O'Malley
+    given: A
+  - family: Christakis
+    given: Nicholas
+  container-title: Statistics in Medicine
+  volume: 30
+  DOI: 10.1002/sim.4190
+  issue: 9
+  page: 950-964
+  type: article-journal
+  issued:
+    year: 2011
+- id: denooy
+  title: Networks of Action and Events over Time. A Multilevel Discrete-time Event History Model for Longitudinal Network Data
+  author:
+  - family: de Nooy
+    given: Wouter
+  container-title: Social Networks
+  volume: 33
+  DOI: 10.1016/j.socnet.2010.09.003
+  issue: 1
+  page: 31-40
+  type: article-journal
+  issued:
+    year: 2011
+- id: beck
+  title: 'Modeling Dynamics in Time-Series–Cross-Section Political Economy Data'
+  author:
+  - family: Beck
+    given: Nathaniel
+  - family: Katz
+    given: Jonathan N.
+  container-title: Annual Review of Political Science
+  volume: 14
+  DOI: 10.1146/annurev-polisci-071510-103222
+  page: 331-352
+  type: article-journal
+  issued:
+    year: 2011
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(root.dir = '/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/', echo = TRUE)
+```
+
+# Data Dictionary
+
+| Varname | Description |
+| ------- | ----------- |
+| destination | The ISO3 code of the destination country (to which one is traveling) |
+| origin | The ISO3 code of the origin country (from which one is traveling) |
+| yr | Year |
+| exempt  | The origin country is exempt from visa by destination country (yes/no) |
+| contig  | Origin shares a border with destination (yes/no) |
+| distw   | Geographic distance between the centroid of origin and the centroid of destination |
+| gdp.dest | Desination's GDP per capita |
+| gdp.diff | Destination GDP/capita - origin GDP/capita |
+| langdist | Linguistic distance between origin and destination |
+| secval.dest | Destination secular values score from World Values Survey |
+| secval.diff | Absolute difference between destination secular values score and origin secular values score |
+| pop.dest | Destination's population size |
+| orig.was.colony | Origin was the colony of destination at any point in history (yes/no) |
+| dest.was.colony | Destination was the colony of origin at any point in history (yes/no) |
+| demscore.orig | Origin's democracy score from Polity IV |
+| demscore.dest | Destination's democracy score from Polity IV |
+| blocscore | How many blocs do origin and destination belong to together? |
+| fragility.orig | Origin's fragility score from Polity IV |
+| fragility.dest | Destination's fragility score from Polity IV |
+| fragility.diff | Absolute difference between destination fragility and origin fragility |
+| exports.from.orig | Annual exports from origin to destination, CEPII data. This is a measure of trade. |
+| fdi.stock | Annual stocks of direct investment by origin into destination |
+| numtravelers.oag.adj | Annual flows of air passengers from origin to destination |
+| migr.stock | Annual stocks of migrants from origin to destination |
+
+# Visa Is Outcome
+
+This is a notebook documenting the analysis of 2010-2018 visa exemption data with a binary outcome of visa waiver / no visa waiver.
+
+## Setup
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+
+# Load libraries
+library(lme4)
+library(MASS)
+library(tidyverse)
+library(GGally)
+library(broomExtra)
+library(texreg)
+library(here)
+
+# Load scaled data
+load(here('data_derived', 'scaled.RData'))
+head(scaleddta)
+```
+
+## Multilevel Regression
+
+My multilevel model has a country pair (dyad) as a unit of analysis. Presumably, dyads are clustered in three different groups: origin, destination and year. Thus, there are 3 levels (not counting the dyad) to the model. All three are crossed (not nested): a specific year applies to multiple destinations, a specific destination exists in multiple years, etc.
+
+Run multilevel regression with origin, destination and year random effects. The outcome is the binary visa waiver variable. Predictors are lagged by one year (or, equivalently, the outcome leads the predictors by a year).
+
+### Static Model (no lagged dependent variable)
+
+One of the issues is whether to include a lagged outcome (visa waiver status from previous year) among the predictors. Doing so would yield a so-called dynamic model. There are different points of view on whether it's okay to do this. [Paul Allison](https://statisticalhorizons.com/lagged-dependent-variables) thinks you shouldn't. Let's say my model, in general form, is
+
+$$y_{ijt} = \alpha + \mathbf{\beta x} + \gamma y_{ij(t-1)} + o_i + d_j + y_t$$
+The random intercepts $o_i$ and $d_j$ represent the combined effects on $y$ of all unobserved time-invariant variables particular to an origin and a destination. They are typically assumed to be normally distributed with a mean of 0, constant variance, and independent of the other variables on the right-hand side. However, because the model applies to all time points, $o_i$ and $d_j$ have direct effects on $y_{ij(t-1)}$. Thus, they cannot be statistically independent of $y_{ij(t-1)}$. Allison says: "The violation of this assumption can bias both the coefficient for the lagged dependent variable (usually too large) and the coefficients for other variables (usually too small)."
+
+On the other hand, researchers like Beck and Katz (2011) say lagged dependent variables on the right hand side aren't necessarily a big deal. (But they do so for time-series-cross-sectional data. Check if that matters.)
+
+#### Model Selection
+
+I use the stepwise regression selection process. The selection will fall somewhere between the null model (random intercepts only) and the full model (all predictors).
+
+##### The Null Model
+
+The model takes the form $\text{logit}(h_{ijt}) = \beta_0 + o_i + d_j + y_t$.
+
+```{r}
+m.null <- glmer(exempt ~ 1 + (1 | origin) + (1 | destination) + (1 | yr), data = scaleddta, family = binomial,
+                control = glmerControl(optimizer = 'bobyqa'))
+
+summary(m.null)$AICtab
+```
+
+##### The Full Model
+
+The full model takes the form
+
+$$\begin{equation} \begin{aligned} \text{logit}(h_{ij(t+1)}) ={} & \beta_0 + \beta_1 \cdot \text{contig}_{ij} + \beta_2 \cdot \text{distw}_{ij} + \\& \beta_3 \cdot \text{gdp.dest}_{jt} + \beta_4 \cdot \text{gdp.diff}_{ijt} + \\& \beta_5 \cdot \text{langdist}_{ij} + \beta_6 \cdot \text{secval.dest}_{j} +\\& \beta_7 \cdot \text{secval.diff}_{ij} + \beta_8 \cdot \text{pop.dest}_{jt} + \\& \beta_9 \cdot \text{orig.was.colony}_{ij} + \\& \beta_{10} \cdot \text{dest.was.colony}_{ij} + \\& \beta_{11} \cdot \text{demscore.dest}_{it} + \\& \beta_{12} \cdot \text{demscore.diff}_{jt} +\\& \beta_{13} \cdot \text{blocscore}_{ijt} + \beta_{14} \cdot \text{fragility.orig}_{jt} + \\& \beta_{15} \cdot \text{fragility.diff}_{it} + \beta_{16} \cdot \text{exports.from.orig}_{ijt} + \\& \beta_{17} \cdot \text{fdi.stock}_{ijt} + \beta_{18} \cdot \text{migr.stock}_{ijt} + \\& \beta_{19} \cdot \text{numtravelers.oag.adj}_{ijt} + o_i + \\& d_j + y_t \end{aligned} \end{equation}$$
+
+```{r}
+system.time(
+  m.full <- glmer(lead(exempt) ~ exempt + contig + distw + gdp.dest + gdp.diff + langdist + secval.dest + 
+                  secval.diff + pop.dest + orig.was.colony + dest.was.colony + demscore.dest + 
+                  demscore.diff + blocscore + fragility.orig + fragility.diff + exports.from.orig + fdi.stock +
+                  numtravelers.oag.adj + migr.stock + (1 | origin) + (1 | destination) + 
+                  (1 | yr), data = scaleddta, family = binomial, control = glmerControl(optimizer = 'bobyqa'))
+)
+```
+
+While we're at it, let's check what is the optimal lag for our independent variables. Above, it was 1 year. Does the fit improve if I lag the predictors by 2 years?
+
+```{r}
+m.full2 <- glmer(lead(exempt, 2) ~ exempt + contig + distw + gdp.dest + gdp.diff + langdist + secval.dest + 
+                  secval.diff + pop.dest + orig.was.colony + dest.was.colony + demscore.dest + 
+                  demscore.diff + blocscore + fragility.orig + fragility.diff + exports.from.orig + fdi.stock +
+                  numtravelers.oag.adj + migr.stock + (1 | origin) + (1 | destination) + 
+                  (1 | yr), data = scaleddta, family = binomial, control = glmerControl(optimizer = 'bobyqa'))
+
+screenreg(list(m.full, m.full2), custom.model.names = c('1-year lag', '2-year lag'))
+```
+
+The AIC/BIC are higher for the 2-year lagged model. It is preferable to lag by only 1 year.
+
+##### Stepwise Regression
+
+I have a problem due to missing values in my data. In a stepwise regression, as different predictors are added or dropped, there will be different numbers of complete cases (i.e., rows with no NA's) for each model. This means that each model will be estimated on a slightly different dataset. They will not be nested and cannot be tested with a likelihood ratio test. Unfortunately, they also cannot be selected based on AIC or BIC. According to [Eduardo García Portugués](https://bookdown.org/egarpor/PM-UC3M/app-nas.html#app-nas) "[c]omparison of AICs or BICs is spurious: the scale of the likelihood changes with the sample size (the likelihood decreases with _n_), which increases AIC / BIC with _n_. Hence using BIC / AIC is not adequate for model selection with missing data."
+
+The only solution is to run all models on a reduced dataset with complete cases only. In my case, dropping incomplete cases reduces the number of observations from 345,708 to 28,185.
+
+```{r}
+dta_complete <- na.omit(scaleddta)
+
+dim(scaleddta)
+dim(dta_complete)
+```
+
+###### Selection
+
+Re-run full model with reduced data:
+
+```{r}
+m.full.comp <- glmer(lead(exempt) ~ contig + distw + gdp.dest + gdp.diff + langdist + secval.dest + 
+                       secval.diff + pop.dest + orig.was.colony + dest.was.colony + demscore.dest + 
+                       demscore.diff + blocscore + fragility.orig + fragility.diff + exports.from.orig + fdi.stock + 
+                       numtravelers.oag.adj + migr.stock + (1 | origin) + (1 | destination) + 
+                       (1 | yr), data = dta_complete, family = binomial, control = glmerControl(optimizer = 'bobyqa'))
+```
+
+Now perform backwards selection (start with full model and drop predictors one by one).
+
+First iteration:
+
+```{r}
+system.time(sel <- drop1(m.full.comp))
+```
+
+```{r}
+sel
+```
+
+We have dropped each predictor while retaining all others in turn. Dropping some raises the AIC; we definitely want to keep those. Dropping others lowers the AIC; these should be considered for elimination. The lowest AIC of 18,952 can be achieved through dropping one of the following predictors: `distw`, `gdp.diff`, `langdist`, `secval.dest`, `secval.diff` or `exports.from.orig`. So, which to drop?
+
+To be continued ...
+
+##### Fixed and Random Effects Model
+Our sample includes the entire universe of countries; thus, they are not a random sample. This suggests their effects should be modeled as fixed, not random. Here, I will run a model with origin and destination fixed effects and year random effect.
+
+```{r}
+#system.time(
+#m.mixed <- glmer(lead(exempt) ~ exempt + contig + distw + gdp.dest + gdp.diff + langdist + secval.dest + 
+#                  secval.diff + pop.dest + orig.was.colony + dest.was.colony + demscore.dest + 
+#                  demscore.diff + blocscore + fragility.orig + fragility.diff + exports.from.orig + fdi.stock +
+#                  numtravelers.oag.adj + migr.stock + as.factor(origin) + as.factor(destination) + 
+#                  (1 | yr), data = scaleddta, family = binomial, control = glmerControl(optimizer = 'bobyqa'))
+#)
+
+load("/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/mmixed.RData")
+
+summary(m.mixed)$AICtab
+```
+
+### Dynamic Model (with lagged dependent variable)
+```{r}
+load('/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/mixed_lagged.RData')
+```
+
+## Compare Models
+
+```{r}
+# Store all models in a list
+Cand.models <- list(m.null, m.full, m.mixed, m.mixed.lagged)
+```
+
+```{r}
+screenreg(Cand.models, omit.coef = "(destination)|(origin)")  # I omit country coefficients here
+```
+
+For later, maybe: Implement the Hausman test to see if fixed is preferred to random. See [https://stackoverflow.com/questions/23630214/hausmans-specification-test-for-glmer-from-lme4].
+
+
+
+
+### Explore Data
+
+```{r message = FALSE, warning = FALSE}
+ggpairs(scaleddta[, c('yr', 'distw', 'gdp.dest', 'gdp.diff', 'secval.diff', 'pop.dest', 'orig.was.colony', 'fragility.orig',  'exports.from.orig', 'fdi.stock', 'numtravelers.oag.adj', 'migr.stock')] %>% filter(yr == 2018) %>% select(-yr))
+```
+
+
+Bloc co-membership weakens the significance of geographic distance.
+
+```{r}
+plot(filter(scaleddta, yr == 2014)$distw, filter(scaleddta, yr == 2014)$blocscore)
+```
+
+```{r}
+ggplot(filter(scaleddta, yr == 2014), aes(x = distw, colour = as.factor(blocscore))) +
+  geom_density(lwd = 1.2, linetype = 1) + facet_wrap(~ blocscore)
+```
+
+Shorter distances are associated with higher blocscores.
+
+
+## Bivariate Correlations
+
+I examine Spearman correlation between the outcome (visa exemption) and each predictor.
+
+```{r}
+predictors <- c('contig', 'distw', 'gdp.dest', 'gdp.diff', 'langdist', 'secval.dest',
+                'secval.diff', 'pop.dest', 'orig.was.colony', 'dest.was.colony', 
+                'demscore.dest', 'blocscore', 'fragility.orig',
+                'exports.from.orig', 'fdi.stock', 'numtravelers.oag.adj',
+                'migr.stock')
+```
+
+Next, run 19 cross-sectional models and compare.
+
+```{r}
+corAll <- function(x) {
+  cor(scaleddta$exempt, x, use = 'complete.obs', method = 'spearman')
+}
+```
+
+Bivariate correlations between `exempt` and each predictor.
+```{r}
+sapply(select(scaleddta, predictors), corAll) %>% enframe() %>% arrange(value)
+```
+
+
+
+
+

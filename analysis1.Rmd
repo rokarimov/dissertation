@@ -1,0 +1,71 @@
+---
+title: "Analyse visa-free network data with multilevel (mixed, hierarchical) models"
+author: "Rouslan Karimov"
+date: "Last updated on `r format(Sys.time(), '%d %B %Y')`"
+project: dissertation
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(root.dir = '/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/', echo = TRUE)
+```
+
+
+# Purpose
+
+This is a notebook where I prepare data for further analysis.
+
+## Data munging
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+
+# Load libraries
+library(tidyverse)
+library(here)
+
+# Load master dataset
+dta <- read_csv(here('data_derived', 'master_dataset_all_vars.csv'), 
+                col_types = cols(max.stay.days = 'd', langdist = 'd',
+                                 migr.stock = 'd', secval.diff = 'd',
+                                 secval.dest = 'd',
+                                 region.dest = 'f', region.orig = 'f',
+                                 income.group.dest = 'f', orig.income.group = 'f',
+                                 contig = 'l', orig.was.colony = 'l',
+                                 dest.was.colony = 'l'))
+
+head(dta)
+```
+
+For programming convenience, I am going to drop some variables as unnecessary. There include:
+
+-   Geographic regions (collinear with distance, culture and GDP)
+-   Income groups (collinear with GDP)
+-   Origin-specific secular values scores. The hypothesis is that they don't affect a destination's openness. Their similarity to the destination will be captured by the difference in secular values, which I keep.
+-   Origin GDP/capita. We have destination GDP and GDP difference; the origin GDP is redundant.
+-   Total GDP or origin: not used in model.
+-   Origin-specific democracy scores. We have destination demscores and the destination/origin difference; the origin demscore is redundant.
+-   Destination-specific fragility scores. The hypothesis is that it's the origin's fragility that makes its citizens into likely migrants/refugees, and so will invite stricter visa regimes from destinations. Also, we keep fragility difference, so destination fragility is redundant.
+-   Unadjusted number of travelers from OAG.
+
+```{r}
+dta_compact <- select(dta, -gdp.total.orig, -gdp.per.cap.orig, -region.dest, -region.orig, -income.group.dest, -income.group.orig, -secval.orig, -demscore.orig, -numtravelers.oag, -fragility.dest)
+```
+
+I am also going to scale and center everything that's not binary or categorical and isn't already scaled. This will make sure the model converges and that the constants have a nicer interpretation (effect when predictors are fixed at their means).
+
+```{r}
+scaled <- scale(select(dta_compact, distw, gdp.per.cap.dest, gdp.total.dest, gdp.per.cap.diff,  langdist,
+                       secval.dest, secval.diff, fdi.stock, exports.from.orig, pop.thou.dest, migr.stock,
+                       numtravelers.oag.adj))
+scaleddta <- data.frame(select(dta_compact, -colnames(scaled)), scaled)
+```
+
+# Export data
+
+```{r}
+save(scaleddta, file = here('data_derived', 'scaled.RData'))
+```
+
+
+

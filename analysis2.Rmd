@@ -1,0 +1,278 @@
+---
+title: "Analyse visa-free network data with multilevel (mixed, hierarchical) models"
+author: "Rouslan Karimov"
+date: "Last updated on `r format(Sys.time(), '%d %B %Y')`"
+project: dissertation
+output: html_notebook
+references:
+- id: inglehart
+  title: How Development Leads to Democracy
+  author:
+  - family: Inglehart
+    given: Ronald
+  - family: Welzel
+    given: Christian
+  container-title: Foreign Affairs
+  volume: 88
+  issue: 2
+  page: 33-48
+  type: article-journal
+  issued:
+    year: 2009
+- id: ruck
+  title: Cultural Prerequisites of Socioeconomic Development
+  author:
+  - family: Ruck
+    given: Damian J.
+  - family: Bentley
+    given: R. Alexander
+  - family: Lawson
+    given: Daniel J.
+  container-title: R. Soc. open sci.
+  volume: 7
+  issue: 2
+  type: article-journal
+  issued:
+    year: 2019
+---
+
+```{r message = FALSE}
+rm(list = ls())
+
+# Load libraries
+suppressPackageStartupMessages(library(GGally))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(car))
+suppressPackageStartupMessages(library(ggdag))
+suppressPackageStartupMessages(library(DiagrammeR))
+```
+
+```{r}
+# Load data
+load('/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/scaled.RData')
+
+```
+
+
+# Exploratory Analysis
+
+Visualize predictors against one another, see if they look correlated. This is a cross-sectional analysis, so I define the year in which I will look at the data. NB: I am performing all the analyses below on centered and scaled data. I am not aware of any problems that this may cause, but <mark>flagging this for question to reviewers</mark>.
+
+```{r}
+myyear <- 2018
+```
+
+
+## Country-level predictors
+
+```{r echo = FALSE, warnings = FALSE, results = 'hide', fig.keep = 'all'}
+# Function to show Loess smoothing in ggpairs
+my_smooth <- function(data, mapping, method="loess", ...) {
+  p <- ggplot(data = data, mapping = mapping) + 
+    geom_point() + 
+    geom_smooth(method = method, ...)
+  p
+  }
+
+# Vertex predictors vs vertex predictors
+ggpairs(scaleddta[, c('yr', 'demscore.dest', 'fragility.orig', 'gdp.per.cap.dest', 'secval.dest', 'pop.thou.dest')] %>% filter(yr == myyear) %>% select(-yr), lower = list(continuous = wrap(my_smooth, method = 'lm', color = 'red'))) %>%
+  print(progress = FALSE, warning = FALSE)
+```
+
+Along the diagonal are each variable's density distributions.
+
+There are several significantly correlated combinations that also look correlated on the graphs. These are all destination characteristics.
+
+- GDP per capita ~ democracy score
+- GDP per capita ~ secular values
+- Secular values ~ democracy score
+
+The relationship between GDP per capita, secular values and democracy has been demonstrated in the literature. In terms of causality, both GDP per capita and democratization appear intuitively to be outcomes, achievements by a functioning society. Secular values appear to be one of the cultural precursors of achieving these outcomes. To formalize the intuition, @ruck conclude that "secular-rationality and cosmopolitanism predict future increases in GDP per capita, democratization and secondary education enrollment. The converse is not true, however, which indicates that secular rationality and cosmopolitanism are among the preconditions for socioeconomic development to emerge." In addition, @inglehart claim that democracy is caused by economic development. It thus seems that the following causal chain may be valid:
+
+```{r echo=FALSE}
+grViz("
+digraph {
+  graph []
+  node [shape = plaintext]
+    A [label = 'Secular Values']
+    Y [label = 'GDP per capita']
+    C [label = 'Democracy Score']
+  edge []
+    A->Y
+    Y->C
+    A->C
+{ rank = same; Y; C }
+}
+", height = 150)
+```
+
+Population has significant correlation coefficients with _democracy scores_, _secular values_ and _GDP per capita_, but charts suggest these are driven by a couple of outliers. I also see no theoretical reason for population size to be correlated with these factors. I will thus treat the correlation as spurious.
+
+## Dyadic predictors
+
+```{r echo = FALSE, results = 'hide', fig.keep = 'all'}
+# Edge predictors vs edge predictors
+ggpairs(scaleddta[, c('yr', 'contig', 'demscore.diff', 'blocscore', 'orig.was.colony', 'dest.was.colony', 'fragility.diff', 'distw', 'gdp.total.dest', 'gdp.per.cap.diff', 'langdist', 'secval.diff', 'fdi.stock', 'exports.from.orig', 'pop.thou.dest', 'migr.stock', 'numtravelers.oag.adj')] %>% filter(yr == myyear) %>% select(-yr),
+        lower = list(continuous = wrap(my_smooth, method = 'lm', color = 'red'))) %>% print(progress = FALSE)
+
+```
+There are multiple apparent relationships here. They are:
+
+- FDI vs democracy score difference, fragility difference, geographic distance, GPD per capita difference, difference in secular values, trade (exports from origin), migration and number of travelers.
+- Trade (exports from origin) vs democracy score difference, fragility difference, geographic distance, GPD per capita difference, difference in secular values, FDI, migration and number of travelers.
+- Number of travelers vs democracy score difference, fragility difference, geographic distance, and difference in secular values.
+- Migration stock vs fragility difference, geographic distance, GDP per capita difference and difference in secular values.
+- Bloc co-membership vs fragility difference and geographic distance.
+- Origin and destination's mutual colonial statuses vs each other.
+- Fragility difference vs language distance.
+- GDP per capita difference vs language distance.
+- Language distance vs secular values difference and democracy score difference.
+
+If predictors are correlated, I can have multicollinearity problems in my regressions. However, to quote [Statalist](https://www.statalist.org/forums/forum/general-stata-discussion/general/1356094-multicollinearity-in-multi-level-models):
+
+>Testing for multicollinearity is usually a waste of time anyway. If your model output has acceptably small standard errors for all your variables, then, whether you have multicollinearity in your data or not, you don't have a multicollinearity problem. If only variables whose effect is of no importance to you, but which was included in the model just to reduce confounding, then the fact that the standard error is large is of no importance and you need not spend any time investigating the cause.
+>
+>If a variable whose effect it is part of your goals to estimate has a large standard error, then you have a problem that might be due to multicollinearity, and that might be worth looking in to. But, unless you are prepared to remove some or all of the variables that are implicated in the multicollinearity from the model, you are just stuck: you have a problem with no solution in the existing data. The only thing you could do in that case is either gather a much larger data set, or start the whole study over with a different sampling design that would break the relationships among the offending variables.
+
+## More Formal Analysis of Dependencies
+The above was just eyeballing the data. Here, I use the above results as the starting point for more formal statistical exploration.
+
+### Bloc Co-membership vs Geographic Distance
+
+Visualize.
+
+```{r echo=FALSE}
+filter(scaleddta, yr == myyear) %>% group_by(blocscore) %>% summarise(mean = mean(distw, na.rm = TRUE)) %>% plot(xlab = "Blocscore", ylab = "Mean Geographic Distance (Scaled)")
+```
+
+Higher bloc scores are associated with a shorter geographic distance. Here are the distributions of distance for each value of the bloc score:
+
+```{r echo = FALSE, results = 'hide', fig.keep = 'all'}
+ggplot(filter(scaleddta, yr == myyear), aes(x = distw, colour = as.factor(blocscore))) +
+  geom_density(lwd = 1.2, linetype = 1) + facet_wrap(~ blocscore) + xlab('Geographic Distance') + 
+  ylab('Density') + labs(colour = 'Bloc score')
+```
+
+I conclude that including bloc co-membership in my regression is likely to weaken the significance of geographic distance. Confirm this with a regression (distance is immutable, so bloc score is dependent variable). I use Poisson regression since the number of co-memberships is a count variable. Since I'll be conducting deviance-based goodness-of-fit tests, I must ensure that all comparator models use the same set of observations so as to be nested. I thus explicitly drop any missing observations of geographic distance.
+
+```{r}
+mod1 <- glm(blocscore ~ distw, data = filter(scaleddta, yr == myyear, !is.na(distw)), family = 'poisson')
+```
+
+Goodness of fit test, per IDRE: https://stats.idre.ucla.edu/r/dae/poisson-regression/.
+
+```{r}
+with(mod1, cbind(res.deviance = deviance,
+                df = df.residual,
+                p = pchisq(deviance, df.residual, lower.tail = FALSE)))
+```
+
+We are testing if the residual deviance from the model (the difference between the deviance of the current model and the maximum deviance of the ideal model where the predicted values are identical to the observed, aka saturated model) is statistically significant. It is not, with $p$ close to 1. Thus, distance explains almost all the variation in the bloc score.
+
+Another test is comparing my model to the null model (no predictors).
+
+```{r}
+nullmod1 <- update(mod1, . ~ . -distw)
+
+## test model differences with chi square test
+anova(nullmod1, mod1, test = 'Chisq')
+```
+
+Adding the distance explanatory variable results in a highly significant decrease in residual deviance; thus distance definitely is highly correlated with the bloc score.
+
+
+### Foreign Direct Investment (FDI) vs Difference in Democracy Scores
+
+Visualize.
+
+```{r}
+filter(scaleddta, yr == myyear) %>% group_by(demscore.diff) %>% summarise(mean = mean(fdi.stock, na.rm = TRUE)) %>% plot(xlab = "Democracy Delta", ylab = 'Mean FDI (Scaled)')
+```
+
+Test with a model.
+
+```{r}
+mod2 <- lm(fdi.stock ~ as.factor(demscore.diff), data = filter(scaleddta, yr == myyear, !is.na(fdi.stock)))
+with(summary(mod2), cbind(adj.r.squared, 
+                          fstat = fstatistic[1], 
+                          pvalue = pf(fstatistic[1], fstatistic[2], fstatistic[3], lower.tail = FALSE))) 
+```
+
+The adjusted R-squared is tiny. The F-statistic for joint significance, however, is highly significant. This means that democracy score differences explain variation in FDI well but are only a small part of the total explanation for this variation. Thus, multicollinearity should not be a problem.
+
+
+### FDI vs Fragility Difference
+
+Visualize.
+
+```{r}
+filter(scaleddta, yr == myyear) %>% group_by(fragility.diff) %>% summarise(mean = mean(fdi.stock, na.rm = TRUE)) %>% plot(xlab = "Fragility Delta", ylab = 'Mean FDI (Scaled)')
+```
+
+Test with a model.
+
+```{r}
+mod3 <- lm(fdi.stock ~ as.factor(fragility.diff), data = filter(scaleddta, yr == myyear, !is.na(fdi.stock)))
+with(summary(mod3), cbind(adj.r.squared, 
+                          fstat = fstatistic[1], 
+                          pvalue = pf(fstatistic[1], fstatistic[2], fstatistic[3], lower.tail = FALSE)))
+```
+
+Same situation as with democracy difference. The adjusted R-squared is tiny but the F-statistic for joint significance is highly significant. This means that fragility score differences explain variation in FDI well but are only a small part of the total explanation for this variation. Thus, multicollinearity should not be a problem.
+
+### Migration vs Secular Values
+
+There is a chicken and egg problem here: migrants are probably attracted to countries whose population espouses similar views but at the same time, as more migrants arrive, the host countries values begin to change. Eyeball the data, labeling the dyads to see who the outliers are.
+
+```{r echo = FALSE, warning = FALSE, results = 'hide', fig.keep = 'all'}
+ggplot(filter(scaleddta, yr == myyear), aes(secval.diff, migr.stock)) + geom_point(alpha = 0) + 
+  geom_text(aes(label = paste0(origin, "-", destination)))
+```
+And the same graph after removing the MEX-USA outlier:
+
+```{r echo = FALSE, warning = FALSE}
+filter(scaleddta, yr == myyear & !(origin == "MEX" & destination == "USA")) %>% 
+  ggplot(aes(secval.diff, migr.stock)) + geom_point(alpha = 0) + 
+  geom_text(aes(label = paste0(origin, "-", destination)))
+```
+Add a trend line:
+```{r echo = FALSE, warning = FALSE}
+filter(scaleddta, yr == myyear & !(origin == "MEX" & destination == "USA")) %>% 
+  ggplot(aes(secval.diff, migr.stock)) + geom_point(alpha = 0.25) + geom_smooth(method = 'loess', col = 'red')
+```
+I will stop the formal analyses here, since multicollinearity does not seem likely to cause insurmountable problems.
+
+# Bivariate Correlations
+
+I examine Spearman correlation between the outcome (visa exemption) and each predictor.
+
+```{r}
+predictors <- c('contig', 'fdi.rel', 'exports.rel', 'migr.rel', 'demscore.dest', 'demscore.diff',
+                'numtravelers.adj.rel', 'blocscore', 'orig.was.colony', 'dest.was.colony', 
+                'fragility.orig', 'fragility.diff', 'distw', 'gdp.per.cap.dest', 'gdp.per.cap.diff',
+                'langdist', 'secval.dest', 'secval.diff', 'fdi.stock', 'exports.from.orig', 
+                'pop.thou.dest', 'migr.stock', 'numtravelers.oag.adj')
+```
+
+Next, run 19 cross-sectional models and compare.
+
+```{r}
+corAll <- function(x) {
+  cor(scaleddta$exempt, x, use = 'complete.obs', method = 'spearman')
+}
+```
+
+Bivariate correlations between `exempt` and each predictor.
+```{r}
+bicor <- sapply(select(scaleddta, all_of(predictors)), corAll) %>% enframe() %>% arrange(value)
+
+# Plot correlations from lowest to highest
+bicor %>% mutate(name = fct_reorder(name, value)) %>% ggplot(aes(name)) + geom_bar(aes(weight = value)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + xlab('Predictor') +
+  ylab('Spearman Corr with "exempt"')
+```
+Secular values, geographic distance and contiguity, destination and origin colony status and GDP per capita seem to have little correlation with our outcome. <mark>What does that mean? Should I drop these?</mark> 
+
+# References
+
+

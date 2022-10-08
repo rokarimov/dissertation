@@ -1,0 +1,254 @@
+---
+title: "Analyse visa-free network data with multilevel (mixed, hierarchical) models"
+author: "Rouslan Karimov"
+date: "Last updated on `r format(Sys.time(), '%d %B %Y')`"
+project: dissertation
+output: html_notebook
+references:
+- id: beck
+  title: Modeling Dynamics in Time-Series–Cross-Section Political Economy Data
+  author:
+  - family: Beck
+    given: Nathaniel
+  - family: Katz
+    given: Jonathan N.
+  container-title: Annual Review of Political Science
+  volume: 14
+  page: 331-52
+  type: article-journal
+  issued:
+    year: 2011
+- id: wilkins
+  title: "To Lag or Not to Lag?: Re-Evaluating the Use of Lagged Dependent Variables in Regression Analysis"
+  author:
+    family: Wilkins
+    given: Arjun S.
+  container-title: Political Science Research and Methods
+  volume: 6
+  issue: 2
+  page: 393-411
+  DOI: 10.1017/psrm.2017.4
+  type: article-journal
+  issued:
+    year: 2017
+---
+
+```{r message=FALSE, warning=FALSE}
+rm(list = ls())
+
+suppressPackageStartupMessages(library(lme4))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(here))
+suppressPackageStartupMessages(library(texreg))
+suppressPackageStartupMessages(library(lmtest))
+
+# Load data
+load(here('data_derived', 'scaled.RData'))
+```
+
+
+## Multilevel Regression
+
+My multilevel model has a country pair (dyad) as a unit of analysis. Presumably, dyads are clustered in three different groups: origin, destination and year. Thus, there are 3 levels (not counting the dyad) to the model. All three are crossed (not nested): a specific year applies to multiple destinations, a specific destination exists in multiple years, etc.
+
+Run multilevel regression with origin, destination and year effects. The outcome is the binary visa waiver variable. Predictors are lagged by one year (or, equivalently, the outcome leads the predictors by a year).
+
+I will use the stepwise regression selection process to pick the best model. It will fall somewhere between the null model (random intercepts only) and the full model (all predictors).
+
+### Static vs. Dynamic Model
+
+However, first I have to make decisions on certain covariates that should be included in all models.
+
+One of the issues is whether to include a lagged outcome (visa waiver status from previous year) among the predictors. Doing so would yield a so-called dynamic model. Omitting it yields a static model. There are different points of view on whether it's okay to use the dynamic models. [Paul Allison](https://statisticalhorizons.com/lagged-dependent-variables) thinks you shouldn't. Let's say my model, in general form, is
+
+$$y_{ijt} = \alpha + \bf{\beta x} + \gamma y_{ij(t-1)} + o_i + d_j + y_t$$
+The random intercepts $o_i$ and $d_j$ represent the combined effects on $y$ of all unobserved time-invariant variables particular to an origin and a destination. They are typically assumed to be normally distributed with a mean of 0, constant variance, and independent of the other variables on the right-hand side. However, because the model applies to all time points, $o_i$ and $d_j$ have direct effects on $y_{ij(t-1)}$. Thus, they cannot be statistically independent of $y_{ij(t-1)}$. Allison says: "The violation of this assumption can bias both the coefficient for the lagged dependent variable (usually too large) and the coefficients for other variables (usually too small)."
+
+On the other hand, researchers like @beck and @wilkins say lagged dependent variables on the right hand side aren't necessarily a big deal.
+
+#### Accounting for Missing Data
+To be able to compare models meaningfully, I have to resolve a problem due to missing values in my data. Whether changing the number of covariates or keeping covariates the same but lagging by different time periods results in different numbers of complete cases (i.e., rows with no NA's) for each model. This means that each model will be estimated on a slightly different dataset. They will not be nested and cannot be tested with a likelihood ratio test. Unfortunately, they also cannot be selected based on AIC or BIC. According to [Eduardo García Portugués](https://bookdown.org/egarpor/PM-UC3M/app-nas.html#app-nas) "[c]omparison of AICs or BICs is spurious: the scale of the likelihood changes with the sample size (the likelihood decreases with _n_), which increases AIC / BIC with _n_. Hence using BIC / AIC is not adequate for model selection with missing data."
+
+The only solution is to run comparison models on a reduced dataset with complete cases only. In my case, dropping incomplete cases reduces the number of observations from 345,708 to 28,184. (Actually, it's 28,183 for the 2-year lag case because that extra year eats one observation. But that shouldn't make much of a difference in the results, so I ignore this.)
+
+When finding incomplete cases below, I only filter out NA's for variables that are part of my models (some, like total national GDP, are in the dataset but are not used). This allows me maximize the number of observations that are left over.
+
+```{r}
+# List all the variables that are not part of the model.
+dropvars <- c("exports.from.orig", "gdp.total.dest", "max.stay.days", "migr.stock", "numtravelers.oag.adj")
+dta_complete <- scaleddta %>% select(-all_of(dropvars)) %>% na.omit()  # Drop max.stay.days because it's only valid for 2018.
+
+dim(scaleddta)
+dim(dta_complete)
+```
+
+
+#### The Null Model
+
+The model takes the form $\text{logit}(h_{ijt}) = \beta_0 + o_i + d_j + y_t$. All predictors (in this case, random effects) are lagged.
+
+```{r}
+system.time(
+  m.stat.null <- glmer(lead(exempt) ~ 1 + (1 | origin) + (1 | destination) + (1 | yr), data = dta_complete, 
+                  family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+)
+
+summary(m.stat.null)$AICtab
+```
+
+#### The Full Model
+
+The full static model takes the form
+
+$$\begin{equation} \begin{aligned} \text{logit}(h_{ij(t+1)}) ={} & \beta_0 + \beta_1 \cdot \text{contig}_{ij} + \beta_2 \cdot \text{distw}_{ij} + \\& \beta_3 \cdot \text{fdi.rel}_{ijt} + \beta_4 \cdot \text{exports.rel}_{ijt} + \\& \beta_5 \cdot \text{migr.rel}_{ijt} + \beta_6 \cdot \text{numtravelers.adj.rel}_{ijt}  + \\& \beta_7 \cdot \text{secval.dest}_{j} + \beta_8 \cdot \text{secval.diff}_{ij} + \\& \beta_9 \cdot \text{orig.was.colony}_{ij} + \\& \beta_{10} \cdot \text{dest.was.colony}_{ij} + \\& \beta_{11} \cdot \text{demscore.dest}_{jt} + \\& \beta_{12} \cdot \text{demscore.diff}_{ijt} +\\& \beta_{13} \cdot \text{blocscore}_{ijt} + \beta_{14} \cdot \text{fragility.orig}_{it} + \\& \beta_{15} \cdot \text{fragility.diff}_{ijt} + \beta_{16} \cdot \text{gdp.per.cap.dest}_{jt} + \\& \beta_{17} \cdot \text{gdp.per.cap.diff}_{ijt} + \beta_{18} \cdot \text{pop.thou.dest}_{ijt} + \\& \beta_{19} \cdot \text{langdist}_{ijt} + o_i + d_j + y_t \end{aligned} \end{equation}$$
+
+```{r}
+m.stat.full <- glmer(lead(exempt) ~ contig + distw + fdi.rel + exports.rel + migr.rel + 
+                    numtravelers.adj.rel + secval.dest + secval.diff + orig.was.colony + 
+                    dest.was.colony + demscore.dest + demscore.diff + blocscore + fragility.orig + 
+                    fragility.diff + gdp.per.cap.dest + gdp.per.cap.diff + pop.thou.dest + langdist +
+                    (1 | origin) + (1 | destination) + (1 | yr), data = dta_complete, 
+                  family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+
+```
+
+The dynamic model is the same, but I add the lagged dependent variable on the right-hand side.
+
+```{r}
+m.dyn.full <- glmer(lead(exempt) ~ exempt + contig + distw + fdi.rel + exports.rel + migr.rel + 
+                    numtravelers.adj.rel + secval.dest + secval.diff + orig.was.colony + 
+                    dest.was.colony + demscore.dest + demscore.diff + blocscore + fragility.orig + 
+                    fragility.diff + gdp.per.cap.dest + gdp.per.cap.diff + pop.thou.dest + langdist +
+                    (1 | origin) + (1 | destination) + (1 | yr), data = dta_complete, 
+                  family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+
+```
+
+Now compare our extreme cases:
+
+```{r}
+screenreg(list(m.stat.null, m.stat.full, m.dyn.full), custom.model.names = c('Null', 'Full Static', 'Full Dynamic'))
+```
+Unsurprisingly, the AIC and BIC statistics tell us that both static and dynamic full models are preferable to the null one. They also tell us that the dynamic model is a better fit. I can confirm this with a log-likelihood ratio test:
+
+```{r}
+lrtest(m.stat.full, m.dyn.full)
+```
+The Chi-squared statistic is highly significant, suggesting that the dynamic model outperforms the static one.
+
+#### Optimal Lag
+
+While we're at it, let's check what is the optimal lag for our independent variables. Above, it was 1 year. Does the fit improve if I lag the predictors by 2 years?
+
+
+```{r}
+m.lag1 <- glmer(lead(exempt) ~ exempt + contig + distw + fdi.rel + exports.rel + migr.rel + 
+                    numtravelers.adj.rel + secval.dest + secval.diff + orig.was.colony + 
+                    dest.was.colony + demscore.dest + demscore.diff + blocscore + fragility.orig + 
+                    fragility.diff + gdp.per.cap.dest + gdp.per.cap.diff + pop.thou.dest + langdist +
+                    (1 | origin) + (1 | destination) + (1 | yr), data = dta_complete, 
+                  family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+  
+  
+m.lag2 <- glmer(lead(exempt, 2) ~ exempt + contig + distw + fdi.rel + exports.rel + migr.rel +
+                   numtravelers.adj.rel + secval.dest + secval.diff + orig.was.colony + 
+                   dest.was.colony + demscore.dest + demscore.diff + blocscore + fragility.orig + 
+                   fragility.diff + gdp.per.cap.dest + gdp.per.cap.diff + pop.thou.dest + langdist +
+                   (1 | origin) + (1 | destination) + (1 | yr), data = dta_complete, 
+                 family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+
+screenreg(list(m.lag1, m.lag2), custom.model.names = c('1-year lag', '2-year lag'))
+```
+
+The AIC/BIC are higher for the 2-year lagged model. It is preferable to lag by only 1 year.
+
+The full dynamic model includes the lagged dependent variable (`exempt`).
+
+```{r}
+m.dyn.full <- glmer(lead(exempt) ~ exempt + contig + distw + fdi.rel + exports.rel + migr.rel + 
+                    numtravelers.adj.rel + secval.dest + secval.diff + orig.was.colony + 
+                    dest.was.colony + demscore.dest + demscore.diff + blocscore + fragility.orig + 
+                    fragility.diff + gdp.per.cap.dest + gdp.per.cap.diff + pop.thou.dest + langdist +
+                    (1 | origin) + (1 | destination) + (1 | yr), data = scaleddta, 
+                  family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+```
+
+```{r}
+screenreg(list(m.stat.full, m.stat.full2), custom.model.names = c('1-year lag', '2-year lag'))
+```
+
+##### Fixed and Random Effects Model
+Our sample includes the entire universe of countries; thus, they are not a random sample. This suggests their effects should be modeled as fixed, not random. Here, I will run a model with origin and destination fixed effects and year random effect.
+
+```{r}
+#system.time(
+#m.mixed <- glmer(lead(exempt) ~ exempt + contig + distw + gdp.dest + gdp.diff + langdist + secval.dest + 
+#                  secval.diff + pop.dest + orig.was.colony + dest.was.colony + demscore.dest + 
+#                  demscore.diff + blocscore + fragility.orig + fragility.diff + exports.from.orig + fdi.stock +
+#                  numtravelers.oag.adj + migr.stock + as.factor(origin) + as.factor(destination) + 
+#                  (1 | yr), data = scaleddta, family = binomial, control = glmerControl(optimizer = 'bobyqa'))
+#)
+
+load("/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/mmixed.RData")
+
+summary(m.mixed)$AICtab
+```
+
+### Dynamic Model (with lagged dependent variable)
+```{r}
+load('/Users/rkarimov/Dropbox/GradSchool/Dissertation/data_derived/mixed_lagged.RData')
+```
+
+## Compare Models
+
+```{r}
+# Store all models in a list
+Cand.models <- list(m.null, m.full, m.mixed, m.mixed.lagged)
+```
+
+```{r}
+screenreg(Cand.models, omit.coef = "(destination)|(origin)")  # I omit country coefficients here
+```
+
+For later, maybe: Implement the Hausman test to see if fixed is preferred to random. See [https://stackoverflow.com/questions/23630214/hausmans-specification-test-for-glmer-from-lme4].
+
+
+
+##### Stepwise Regression
+
+I have a problem due to missing values in my data. In a stepwise regression, as different predictors are added or dropped, there will be different numbers of complete cases (i.e., rows with no NA's) for each model. This means that each model will be estimated on a slightly different dataset. They will not be nested and cannot be tested with a likelihood ratio test. Unfortunately, they also cannot be selected based on AIC or BIC. According to [Eduardo García Portugués](https://bookdown.org/egarpor/PM-UC3M/app-nas.html#app-nas) "[c]omparison of AICs or BICs is spurious: the scale of the likelihood changes with the sample size (the likelihood decreases with _n_), which increases AIC / BIC with _n_. Hence using BIC / AIC is not adequate for model selection with missing data."
+
+The only solution is to run all models on a reduced dataset with complete cases only. In my case, dropping incomplete cases reduces the number of observations from 345,708 to 28,185. (When finding incomplete cases, I want to ignore NA's for variables that are not part of the model. This way I maximize the number of observations that are left over.)
+
+
+###### Selection
+
+Re-run full model with reduced data:
+
+```{r}
+m.full.comp <- glmer(lead(exempt) ~ exempt + contig + distw + fdi.rel + exports.rel + migr.rel + 
+                    numtravelers.adj.rel + secval.dest + secval.diff + orig.was.colony + 
+                    dest.was.colony + demscore.dest + demscore.diff + blocscore + fragility.orig + 
+                    fragility.diff + gdp.per.cap.dest + gdp.per.cap.diff + pop.thou.dest + langdist +
+                    (1 | origin) + (1 | destination) + (1 | yr), data = dta_complete, 
+                  family = binomial, control = glmerControl(optimizer = 'bobyqa'), nAGQ = 0)
+```
+
+Now perform backwards selection (start with full model and drop predictors one by one).
+
+First iteration:
+
+```{r}
+system.time(sel <- drop1(m.full.comp))
+```
+
+```{r}
+sel
+```
+
+We have dropped each predictor while retaining all others in turn. Dropping some raises the AIC; we definitely want to keep those. Dropping others lowers the AIC; these should be considered for elimination. The lowest AIC of 18,952 can be achieved through dropping one of the following predictors: `distw`, `gdp.diff`, `langdist`, `secval.dest`, `secval.diff` or `exports.from.orig`. So, which to drop?
+
+To be continued ...
+
+## References
+
